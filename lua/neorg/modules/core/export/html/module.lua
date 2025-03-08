@@ -1,7 +1,7 @@
 --[[
     file: HTML-Export
-    title: Neorg's HTML Exporter
-    summary: Interface for `core.export` to allow exporting to HTML.
+    title: Neorg's Markdown Exporter
+    summary: Interface for `core.export` to allow exporting to markdown.
     ---
 This module exists as an interface for `core.export` to export `.norg` files to HTML.
 As a user the only reason you would ever have to touch this module is to configure *how* you'd
@@ -15,706 +15,633 @@ To learn more about configuration, consult the [relevant section](#configuration
 -- details will be necessary.
 
 local neorg = require("neorg.core")
-local modules = neorg.modules
+local lib, modules = neorg.lib, neorg.modules
 
 local module = modules.create("core.export.html")
 
 module.setup = function()
-	return {
-		success = true,
-		requires = {
-			"core.integrations.treesitter",
-			"core.esupports.hop",
-		},
-	}
+  return {
+    success = true,
+    requires = {
+      "core.integrations.treesitter",
+    },
+  }
 end
 
---- Enumeration of different stackk types
----@enum StackKey
+local last_parsed_link_location = ""
+
 local StackKey = {
-	LIST = "list",
-	BLOCK_QUOTE = "blockquote",
-	SPAN = "span",
+  LIST = "list",
+  BLOCK_QUOTE = "blockquote",
 }
-
---- Enumeration of differnete link target types.
---- @enum HeadingType
-local HeadingType = {
-	HEADING1 = "h1",
-	HEADING2 = "h2",
-	HEADING3 = "h3",
-	HEADING4 = "h4",
-	HEADING5 = "h5",
-	HEADING6 = "h6",
-}
-
---- @class Location
---- @field file string
---- @field text string
---- @field type HeadingType
 
 --> Generic Utility Functions
 
---- Escapes unsafe characters in the string
----@param text string string being escaped
----@return string
-local function html_escape(text)
-	local escaped_text =
-		text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub('"', "&quot;"):gsub("'", "&#39;")
-	return escaped_text
-end
-
---- Applies HTML escaping to a word node
----@param word string
----@return  table
-local function escape_word(word)
-	return {
-		output = html_escape(word),
-	}
-end
-
---- Adds opening tag and pushes closing tag onto stack to be popped in a recollector.
----@param tag string
----@param level number
----@param stack_key StackKey
----@return fun(_: any, _: any, state: table): table
 local function nest_tag(tag, level, stack_key)
-	return function(text, _, state)
-		if not state.nested_tag_stacks[stack_key] then
-			state.nested_tag_stacks[stack_key] = {}
-		end
+  return function(_, _, state)
+    if not state.nested_tag_stacks[stack_key] then
+      state.nested_tag_stacks[stack_key] = {}
+    end
 
-		local attributes = ""
-		if stack_key == StackKey.SPAN then
-			attributes = ' id="generic-' .. text:lower():gsub("<", ""):gsub(">", ""):gsub(" ", "") .. '" '
-		end
+    local output = ""
+    local opening_tag = "\n<" .. tag .. ">\n"
+    local closing_tag = "\n</" .. tag .. ">\n"
 
-		local output = ""
-		local opening_tag = "\n<" .. tag .. attributes .. ">\n"
-		local closing_tag = "\n</" .. tag .. ">\n"
+    while level > #state.nested_tag_stacks[stack_key] do
+      output = output .. opening_tag
+      table.insert(state.nested_tag_stacks[stack_key], closing_tag)
+    end
 
-		while level > #state.nested_tag_stacks[stack_key] do
-			output = output .. opening_tag
-			table.insert(state.nested_tag_stacks[stack_key], closing_tag)
-		end
+    while level < #state.nested_tag_stacks[stack_key] do
+      output = output .. table.remove(state.nested_tag_stacks[stack_key])
+    end
 
-		while level < #state.nested_tag_stacks[stack_key] do
-			output = output .. table.remove(state.nested_tag_stacks[stack_key])
-		end
-
-		return {
-			output = output,
-			keep_descending = true,
-		}
-	end
+    return {
+      output = output,
+      keep_descending = true,
+    }
+  end
 end
 
---- Recollects tags by popping them off the stack and appending them to the
---- output
----@param stack_key StackKey
----@return fun(output: table, state: table): table
 local function nested_tag_recollector(stack_key)
-	return function(output, state)
-		local suffix = ""
+  return function(output, state)
+    local suffix = ""
 
-		local closing_tag = table.remove(state.nested_tag_stacks[stack_key])
-		while closing_tag do
-			suffix = suffix .. closing_tag
-			closing_tag = table.remove(state.nested_tag_stacks[stack_key])
-		end
+    local closing_tag = table.remove(state.nested_tag_stacks[stack_key])
+    while closing_tag do
+      suffix = suffix .. closing_tag
+      closing_tag = table.remove(state.nested_tag_stacks[stack_key])
+    end
 
-		table.insert(output, suffix)
+    table.insert(output, suffix)
 
-		return output
-	end
+    return output
+  end
 end
 
---- Return true when a given stack key is empty
----@param state table
----@param stack_key StackKey
----@return boolean
 local function is_stack_empty(state, stack_key)
-	return not state.nested_tag_stacks[stack_key] or #state.nested_tag_stacks[stack_key] == 0
+  return state.nested_tag_stacks[stack_key] and #state.nested_tag_stacks[stack_key] > 0
 end
 
----@param heading_type HeadingType
----@param target_type LinkType
----@return fun(): table
-local function heading(heading_type, target_type)
-	return function()
-		return {
-			output = "<div>\n",
-			keep_descending = true,
-			state = {
-				heading = heading_type,
-				target_type = target_type,
-			},
-		}
-	end
+local function todo_item(type)
+  return function()
+    return {
+      output = "",
+      state = {
+        todo = "undone",
+      },
+    }
+  end
 end
 
----Appends the closing p tag when required
----@param output table
----@param state table
----@return table
-local function add_closing_p_tag(output, state)
-	if not state.link and is_stack_empty(state, StackKey.LIST) and is_stack_empty(state, StackKey.SPAN) then
-		local new_output = { "\n<p>\n" }
-		for _, value in ipairs(output) do
-			table.insert(new_output, value)
-		end
-		table.insert(new_output, "\n</p>\n")
-		output = new_output
-	end
 
-	return output
+local function get_metadata_array_prefix(node, state)
+  return node:parent():type() == "array" and string.rep(" ", state.indent) .. "- " or ""
 end
 
----Appends a given tag to the output
----@param tag string
----@param cleanup? fun(state)
----@return fun(output: table, state: table): table
+local function handle_metadata_literal(text, node, state)
+  -- If the parent is an array, we need to indent it and add the `- ` prefix. Otherwise, there will be a key right before which will take care of indentation
+  return get_metadata_array_prefix(node, state) .. text .. "\n"
+end
+
+local function update_indent(value)
+  return function(_, _, state)
+    return {
+      state = {
+        indent = state.indent + value,
+      },
+    }
+  end
+end
+
+--> Recollector Utility Functions
+
+local function heading_function(level)
+  return function()
+    return {
+      output = "<div>\n",
+      keep_descending = true,
+      state = {
+        heading = level,
+      },
+    }
+  end
+end
+
 local function add_closing_tag(tag, cleanup)
-	return function(output, state)
-		table.insert(output, tag)
-		if cleanup then
-			cleanup(state)
-		end
-		return output
-	end
+  return function(output, state)
+    table.insert(output, tag)
+    if cleanup then
+      cleanup(state)
+    end
+    return output
+  end
 end
 
----Builds a link and adds it to the output givne recollected data in the state table.
----@param type "save_anchor"|"use_link"
----@return fun(_: any, state: table): table
-local function wrap_anchor(type)
-	return function(output, state)
-		local link_builder = module.config.public.link_builders.link_builder
-			or module.private.link_builders.link_builder
-
-		local href
-		if state.link then
-			href = link_builder(state.link)
-		else
-			href = ""
-		end
-
-		local content
-		if #output > 0 and output[1] ~= "" then
-			content = output[1]
-		else
-			content = state.link.link_text
-		end
-
-		if type == "anchor_definition" then
-			state.anchors[content] = href
-		end
-
-		output = {
-			'<a href="' .. href .. '">',
-			content,
-			"</a>",
-		}
-
-		state.link = nil
-
-		return output
-	end
+local function handle_metadata_composite_element(empty_element)
+  return function(output, state, node)
+    if vim.tbl_isempty(output) then
+      return { get_metadata_array_prefix(node, state), empty_element, "\n" }
+    end
+    local parent = node:parent():type()
+    if parent == "array" then
+      -- If the parent is an array, we need to splice an extra `-` prefix to the first element
+      output[1] = output[1]:sub(1, state.indent) .. "-" .. output[1]:sub(state.indent + 2)
+    elseif parent == "pair" then
+      -- If the parent is a pair, the first element should be on the next line
+      output[1] = "\n" .. output[1]
+    end
+    return output
+  end
 end
 
-local function set_link(_, node)
-	local hop = modules.get_module("core.esupports.hop")
-	local link = hop.parse_link(node, 0)
-
-	-- Fails to locate link target when the link is in an unopened buffer:
-	--
-	-- local target = hop.locate_link_target(link)
-	--
-	-- # Error message
-	-- Buffer <number> must be loaded to create parser
-	-- ...nvimbnlmap/usr/share/nvim/runtime/lua/vim/treesitter.lua:104: in function 'get_parser'
-	-- ...ua/neorg/modules/core/integrations/treesitter/module.lua:661: in function 'get_document_root'
-
-	return {
-		output = "",
-		keep_descending = true,
-		state = {
-			link = link,
-		},
-	}
+local function anchor_recollector(output)
+  return {
+    "<a href=\"" .. last_parsed_link_location .. "\">",
+    output[1],
+    "</a>",
+  }
 end
+---
 
----Just keeps swimming
----@param state_or_fn? table|fun(): table
----@return fun(): table
-local function keep_descending(state_or_fn)
-	return function()
-		local state
-		if type(state_or_fn) == "function" then
-			state = state_or_fn()
-		else
-			state = state_or_fn
-		end
+module.load = function()
+  if module.config.public.extensions == "all" then
+    module.config.public.extensions = {
+      "todo-items-basic",
+      "todo-items-pending",
+      "todo-items-extended",
+      "definition-nest_tags",
+      "mathematics",
+      "metadata",
+      "latex",
+    }
+  end
 
-		return {
-			output = "",
-			keep_descending = true,
-			state = state,
-		}
-	end
+  module.config.public.extensions = lib.to_keys(module.config.public.extensions, {})
 end
-
----@param output table
----@return table
-local function recollect_footnote(output, state)
-	local title = table.remove(output, 1) .. table.remove(output, 1)
-	local content = table.concat(output)
-	local footnote_number = #state.footnotes + 1
-
-	table.insert(state.footnotes, { title = title, content = content, number = footnote_number })
-
-	return {
-		'<a href="#footnote-' .. footnote_number .. '">[' .. footnote_number .. "]</a>",
-	}
-end
-
----@return fun(text: string, node: TSNode): table
-local function ranged_verbatim_tag_content()
-	return function(text, node)
-		local _, start_column = node:range()
-		local indent = ""
-		local i = 0
-		while i < start_column do
-			indent = indent .. " "
-			i = i + 1
-		end
-
-		return {
-			output = "",
-			state = {
-				tag_content = indent .. text,
-				tag_indent_level = start_column,
-			},
-		}
-	end
-end
-
-local function init_state()
-	return {
-		todo = nil,
-		tag_params = {},
-		tag_close = nil,
-		heading = nil,
-		ranged_tag_indentation_level = 0,
-		is_url = false,
-		nested_tag_stacks = {},
-		anchors = {},
-		link = nil,
-		footnotes = {},
-	}
-end
-
----@param text string
----@param state  table
----@return table
-local function paragraph_segment(text, _, state)
-	local output = "\n"
-	local target_builder = module.config.public.link_builders.target_builder
-		or module.private.link_builders.target_builder
-
-	if state.heading then
-		output = "<" .. state.heading .. ' id="' .. target_builder({ type = state.target_type, text = text }) .. '">'
-		-- Add span to support generic link targets
-		output = output .. '<span id="' .. target_builder({ type = "generic", text = text }) .. '"></span>'
-	end
-
-	local todo = ""
-	if state.todo then
-		todo = '<span class="todo-status-' .. state.todo .. '"></span>'
-		state.todo = nil
-	end
-
-	return {
-		output = output .. todo,
-		keep_descending = true,
-	}
-end
-
----@param node TSNode
----@return string
-local function get_opening_tag(_, node)
-	local parent_type = node:parent():type()
-	local tag = module.private.open_close_tags[parent_type]
-	if type(tag) == "table" then
-		return "<" .. tag.tag .. ' class="' .. tag.class .. '">'
-	elseif tag then
-		return "<" .. tag .. ">"
-	else
-		return ""
-	end
-end
-
----@param node TSNode
----@return string
-local function get_closing_tag(_, node)
-	local parent_type = node:parent():type()
-	local tag = module.private.open_close_tags[parent_type]
-
-	if type(tag) == "table" then
-		return "</" .. tag.tag .. ">"
-	elseif tag then
-		return "</" .. tag .. ">"
-	else
-		return ""
-	end
-end
-
----@param text string
----@return table
-local function add_tag_name(text)
-	return {
-		output = "",
-		state = {
-			tag_name = text,
-		},
-	}
-end
-
----@param text string
----@param state table
----@return table
-local function add_tag_param(text, _, state)
-	local tag_params = table.insert(state.tag_params, text)
-
-	return {
-		output = "",
-		state = {
-			tag_params = tag_params,
-		},
-	}
-end
-
----@param output table
----@param state table
----@return table
-local function add_closing_segement_tags(output, state)
-	if state.heading then
-		table.insert(output, "</" .. state.heading .. ">")
-		state.heading = nil
-		state.target_type = nil
-	end
-
-	return output
-end
-
----@param output table
----@param state table
----@return table
-local function apply_ranged_tag_handlers(output, state)
-	local name = state.tag_name
-	local content = state.tag_content
-	local params = state.tag_params
-
-	local ranged_tag_handler = module.config.public.ranged_tag_handler[name]
-		or module.private.ranged_tag_handler[name]
-		or module.private.ranged_tag_handler["comment"]
-
-	table.insert(output, ranged_tag_handler(params, content, state.tag_indent_level))
-
-	state.tag_name = ""
-	state.tag_params = {}
-	state.tag_content = ""
-	state.tag_indent_level = 0
-
-	return output
-end
-
-local function build_footnote(footnote)
-	return table.concat({
-		'\n<div class="footnote" id="footnote-' .. footnote.number .. '">',
-		'\n<div class="footnote-number">\n',
-		footnote.number,
-		"\n</div>",
-		'\n<div class="footnote-title">\n',
-		footnote.title,
-		"\n</div>",
-		'\n<div class="footnore-content">\n',
-		footnote.content,
-		"\n</div>",
-		"\n</div>",
-		"\n",
-	})
-end
-
-local function get_anchor(_, node, _)
-	local hop = modules.get_module("core.esupports.hop")
-
-	local target = hop.locate_anchor_declaration_target(node)
-	local link = nil
-	local link_desription = nil
-	local anchor_definition = nil
-	if target then
-		link_desription = target.node:parent()
-	end
-	if link_desription then
-		anchor_definition = link_desription:parent()
-	end
-	if anchor_definition then
-		link = hop.parse_link(anchor_definition, 0)
-	end
-
-	return {
-		keep_descending = true,
-		state = {
-			link = link,
-		},
-	}
-end
-
-module.load = function() end
 
 module.config.public = {
-	--- If you'd like to modify the way specific range tabs are handled. For
-	--- example if you wanted to translate document.meta into use-case specific
-	--- HTML, you could so here (see: module.private[ranged_tag_handler""] for
-	--- examples).
-	ranged_tag_handler = {},
-	-- Used by the exporter to know what extension to use
-	-- when creating HTML files.
-	-- The default is recommended, although you can change it.
-	extension = "html",
-	link_builders = {
-		-- TODO
-		target_builder = nil,
-		-- TODO
-		link_builder = nil,
-		-- TODO
-		path_builder = nil,
-	},
+  -- Any extensions you may want to use when exporting to markdown. By
+  -- default no extensions are loaded (the exporter is commonmark compliant).
+  -- You can also set this value to `"all"` to enable all extensions.
+  -- The full extension nest_tag is: `todo-items-basic`, `todo-items-pending`, `todo-items-extended`,
+  -- `definition-nest_tags`, `mathematics`, `metadata` and `latex`.
+  extensions = {},
+
+  -- Data about how to render mathematics.
+  -- The default is recommended as it is the most common, although certain flavours
+  -- of markdown use different syntax.
+  mathematics = {
+    -- Inline mathematics are represented `$like this$`.
+    inline = {
+      start = "$",
+      ["end"] = "$",
+    },
+    -- Block-level mathematics are represented as such:
+    --
+    -- ```md
+    -- $$
+    -- \frac{3, 2}
+    -- $$
+    -- ```
+    block = {
+      start = "$$",
+      ["end"] = "$$",
+    },
+  },
+
+  -- Data about how to render metadata
+  -- There are a few ways to render metadata blocks, but this is the most
+  -- common.
+  metadata = {
+    start = "---",
+    ["end"] = "---", -- Is usually also "..."
+  },
+
+  -- Used by the exporter to know what extension to use
+  -- when creating markdown files.
+  -- The default is recommended, although you can change it.
+  extension = "md",
 }
 
-module.private = {
-	ranged_tag_handler = {
-		["code"] = function(params, content, indent_level)
-			local language = params[1] or ""
-
-			local indent_regex = "^" .. string.rep("%s", indent_level)
-			local lines_of_code = {}
-
-			for line in string.gmatch(content, "[^\n]+") do
-				local normalized_line = line:gsub(indent_regex, "")
-				table.insert(lines_of_code, normalized_line)
-			end
-
-			local code_block = html_escape(table.concat(lines_of_code, "\n"))
-
-			return '\n<pre>\n<code class="' .. language .. '">\n' .. code_block .. "\n</code>\n</pre>\n"
-		end,
-
-		["comment"] = function(_, content)
-			return "\n<!--\n" .. content .. "\n-->\n"
-		end,
-	},
-	open_close_tags = {
-		["bold"] = "b",
-		["italic"] = "i",
-		["underline"] = "u",
-		["strikethrough"] = "s",
-		["spoiler"] = { tag = "span", class = "spoiler" },
-		["verbatim"] = { tag = "code", class = "verbatim" },
-		["superscript"] = "sup",
-		["subscript"] = "sub",
-		["inline_math"] = { tag = "code", class = "inline-math" },
-	},
-	link_builders = {
-		target_builder = function(target)
-			if target.type == "external_file" or target.type == "url" then
-				-- External links and target URLs don't have target support by default.
-				return ""
-			end
-			local text = target.text or ""
-
-			return target.type .. "-" .. text:lower():gsub(" ", "")
-		end,
-		path_builder = function(link)
-			local file = link.file or ""
-			if file:match("%$/") then
-				local workspace_path = "/"
-				local dirman = modules.get_module("core.dirman")
-				local current_workspace = dirman.get_current_workspace()
-				if current_workspace then
-					workspace_path = "/" .. current_workspace[1] .. "/"
-				end
-				return (link.file:gsub("%$/", workspace_path):gsub(".norg", ""))
-			elseif #file > 0 then
-				return (link.file:gsub("%$", "/"):gsub(".norg", ""))
-			else
-				return ""
-			end
-		end,
-		link_builder = function(link)
-			local target_builder = module.config.public.link_builders.target_builder
-				or module.private.link_builders.target_builder
-			local path_builder = module.config.public.link_builders.path_builder
-				or module.private.link_builders.path_builder
-
-			if link.link_type == "external_file" then
-				local file = link.link_file_text or ""
-				return "file://" .. file:gsub(" ", "")
-			end
-
-			if link.link_type == "url" then
-				return link.link_location_text
-			end
-
-			return path_builder(link)
-				.. "#"
-				.. target_builder({ type = link.link_type, text = link.link_location_text })
-		end,
-	},
-}
-
---- @class core.export.html
+--- @class core.export.markdown
 module.public = {
-	export = {
-		init_state = init_state,
-		functions = {
-			["_word"] = escape_word,
-			["_space"] = escape_word,
-			["_open"] = get_opening_tag,
-			["_close"] = get_closing_tag,
-			["_begin"] = "",
-			["_end"] = "",
-			["escape_sequence"] = keep_descending(),
-			["any_char"] = true,
+  export = {
+    init_state = function()
+      return {
+        todo = nil,
+        weak_indent = 0,
+        indent = 0,
+        heading = 0,
+        tag_indent = 0,
+        tag_close = nil,
+        ranged_tag_indentation_level = 0,
+        is_url = false,
+        footnote_count = 0,
+        nested_tag_stacks = {},
+      }
+    end,
 
-			["paragraph_segment"] = paragraph_segment,
-			["paragraph"] = keep_descending(),
+    functions = {
 
-			["heading1"] = heading(HeadingType.HEADING1, "heading1"),
-			["heading2"] = heading(HeadingType.HEADING2, "heading2"),
-			["heading3"] = heading(HeadingType.HEADING3, "heading3"),
-			["heading4"] = heading(HeadingType.HEADING4, "heading4"),
-			["heading5"] = heading(HeadingType.HEADING5, "heading5"),
-			["heading6"] = heading(HeadingType.HEADING6, "heading6"),
+      -- TODO: ["single_footnote"] = true,
 
-			["inline_link_target"] = nest_tag("span", 1, StackKey.SPAN),
+      ["_word"] = true,
+      ["_space"] = true,
+      -- TODO: ["_segment"] = true,
 
-			["unordered_list1"] = nest_tag("ul", 1, StackKey.LIST),
-			["unordered_list2"] = nest_tag("ul", 2, StackKey.LIST),
-			["unordered_list3"] = nest_tag("ul", 3, StackKey.LIST),
-			["unordered_list4"] = nest_tag("ul", 4, StackKey.LIST),
-			["unordered_list5"] = nest_tag("ul", 5, StackKey.LIST),
-			["unordered_list6"] = nest_tag("ul", 6, StackKey.LIST),
-			["unordered_list1_prefix"] = "\n<li>\n",
-			["unordered_list2_prefix"] = "\n<li>\n",
-			["unordered_list3_prefix"] = "\n<li>\n",
-			["unordered_list4_prefix"] = "\n<li>\n",
-			["unordered_list5_prefix"] = "\n<li>\n",
-			["unordered_list6_prefix"] = "\n<li>\n",
+      ["paragraph_segment"] = function(_, _, state)
+        local output = ""
 
-			["ordered_list1"] = nest_tag("ol", 1, StackKey.LIST),
-			["ordered_list2"] = nest_tag("ol", 2, StackKey.LIST),
-			["ordered_list3"] = nest_tag("ol", 3, StackKey.LIST),
-			["ordered_list4"] = nest_tag("ol", 4, StackKey.LIST),
-			["ordered_list5"] = nest_tag("ol", 5, StackKey.LIST),
-			["ordered_list6"] = nest_tag("ol", 6, StackKey.LIST),
-			["ordered_list1_prefix"] = "\n<li>\n",
-			["ordered_list2_prefix"] = "\n<li>\n",
-			["ordered_list3_prefix"] = "\n<li>\n",
-			["ordered_list4_prefix"] = "\n<li>\n",
-			["ordered_list5_prefix"] = "\n<li>\n",
-			["ordered_list6_prefix"] = "\n<li>\n",
+        if state.heading and state.heading > 0 then
+          output = "<h" .. state.heading .. ">"
+        elseif is_stack_empty(state, StackKey.LIST) then
+          output = "<li>"
+        else
+          output = "<p>"
+        end
 
-			["quote1"] = nest_tag("blockquote", 1, StackKey.BLOCK_QUOTE),
-			["quote2"] = nest_tag("blockquote", 2, StackKey.BLOCK_QUOTE),
-			["quote3"] = nest_tag("blockquote", 3, StackKey.BLOCK_QUOTE),
-			["quote4"] = nest_tag("blockquote", 4, StackKey.BLOCK_QUOTE),
-			["quote5"] = nest_tag("blockquote", 5, StackKey.BLOCK_QUOTE),
-			["quote6"] = nest_tag("blockquote", 6, StackKey.BLOCK_QUOTE),
+        local todo = ""
+        if state.todo then
+          todo = "<span class=\"todo-status-" .. state.todo .. "\"></span>"
+          state.todo = nil
+        end
 
-			["tag_parameters"] = keep_descending(function()
-				return { tag_params = {} }
-			end),
-			["tag_name"] = add_tag_name,
-			["tag_param"] = add_tag_param,
-			["ranged_verbatim_tag_content"] = ranged_verbatim_tag_content(),
+        return {
+          output = output .. todo,
+          keep_descending = true,
+        }
+      end,
 
-			["todo_item_done"] = keep_descending({ todo = "done" }),
-			["todo_item_undone"] = keep_descending({ todo = "undone" }),
-			["todo_item_pending"] = keep_descending({ todo = "pending" }),
-			["todo_item_urgent"] = keep_descending({ todo = "urgent" }),
-			["todo_item_cancelled"] = keep_descending({ todo = "cancelled" }),
-			["todo_item_recurring"] = keep_descending({ todo = "recurring" }),
-			["todo_item_on_hold"] = keep_descending({ todo = "on_hold" }),
-			["todo_item_uncertain"] = keep_descending({ todo = "uncertain" }),
+      ["heading1"] = heading_function(1),
+      ["heading2"] = heading_function(2),
+      ["heading3"] = heading_function(3),
+      ["heading4"] = heading_function(4),
+      ["heading5"] = heading_function(5),
+      ["heading6"] = heading_function(6),
 
-			["single_footnote"] = keep_descending(),
-			["multi_footnote"] = keep_descending(),
+      ["_open"] = function(_, node)
+        local type = node:parent():type()
 
-			["link"] = set_link,
-			["anchor_definition"] = set_link,
-			["anchor_declaration"] = get_anchor,
+        if type == "bold" then
+          return "<b>"
+        elseif type == "italic" then
+          return "<i>"
+        elseif type == "underline" then
+          return "<u>"
+        elseif type == "strikethrough" then
+          return "<s>"
+        elseif type == "spoiler" then
+          return "<span class=\"spoiler\">"
+        elseif type == "verbatim" then
+          return "<pre>"
+        elseif type == "superscript" then
+          return "<sup>"
+        elseif type == "subscript" then
+          return "<sub>"
+        elseif type == "inline_comment" then
+          return "<!-- "
+        elseif type == "inline_math" and module.config.public.extensions["mathematics"] then
+          return module.config.public.mathematics.inline["start"]
+        end
+      end,
 
-			["strong_carryover"] = "",
-			["weak_carryover"] = "",
+      ["_close"] = function(_, node)
+        local type = node:parent():type()
 
-			-- [UNSUPPORTED] Infirm Tags are not currently supported, TS parsing
-			-- is returning unexpected ranges for .image tag, specically "http:"
-			-- gets included as a param and then the rest of hte URL is moved to
-			-- the following paragraph as content.
-			["infirm_tag"] = "",
-		},
+        if type == "bold" then
+          return "</b>"
+        elseif type == "italic" then
+          return "</i>"
+        elseif type == "underline" then
+          return "</u>"
+        elseif type == "strikethrough" then
+          return "</s>"
+        elseif type == "spoiler" then
+          return "</span>" -- TODO
+        elseif type == "verbatim" then
+          return "</pre>"  -- TODO
+        elseif type == "superscript" then
+          return "</sup>"
+        elseif type == "subscript" then
+          return "</sub>"
+        elseif type == "inline_comment" then
+          return " -->"
+        elseif type == "inline_math" and module.config.public.extensions["mathematics"] then
+          return module.config.public.mathematics.inline["end"]
+        end
+      end,
 
-		recollectors = {
-			["paragraph"] = add_closing_p_tag,
-			["paragraph_segment"] = add_closing_segement_tags,
+      ["_begin"] = "",
+      ["_end"] = "",
 
-			["link"] = wrap_anchor("use_link"),
-			["anchor_definition"] = wrap_anchor("save_anchor"),
-			["anchor_declaration"] = wrap_anchor("use_link"),
+      ["link_file_text"] = function(text)
+        return vim.uri_from_fname(text .. ".html"):sub(string.len("file://") + 1)
+      end,
 
-			["generic_list"] = nested_tag_recollector(StackKey.LIST),
-			["quote"] = nested_tag_recollector(StackKey.BLOCK_QUOTE),
-			["inline_link_target"] = nested_tag_recollector(StackKey.SPAN),
+      ["link_target_url"] = function()
+        return {
+          state = {
+            is_url = true,
+          },
+        }
+      end,
 
-			["heading1"] = add_closing_tag("\n</div>\n"),
-			["heading2"] = add_closing_tag("\n</div>\n"),
-			["heading3"] = add_closing_tag("\n</div>\n"),
-			["heading4"] = add_closing_tag("\n</div>\n"),
-			["heading5"] = add_closing_tag("\n</div>\n"),
-			["heading6"] = add_closing_tag("\n</div>\n"),
+      ["escape_sequence"] = function(text)
+        local escaped_char = text:sub(-1)
+        return escaped_char:match("%p") and text or escaped_char
+      end,
 
-			["unordered_list1"] = add_closing_tag("\n</li>\n"),
-			["unordered_list2"] = add_closing_tag("\n</li>\n"),
-			["unordered_list3"] = add_closing_tag("\n</li>\n"),
-			["unordered_list4"] = add_closing_tag("\n</li>\n"),
-			["unordered_list5"] = add_closing_tag("\n</li>\n"),
-			["unordered_list6"] = add_closing_tag("\n</li>\n"),
-			["ordered_list1"] = add_closing_tag("\n</li>\n"),
-			["ordered_list2"] = add_closing_tag("\n</li>\n"),
-			["ordered_list3"] = add_closing_tag("\n</li>\n"),
-			["ordered_list4"] = add_closing_tag("\n</li>\n"),
-			["ordered_list5"] = add_closing_tag("\n</li>\n"),
-			["ordered_list6"] = add_closing_tag("\n</li>\n"),
+      ["unordered_list1"] = nest_tag("ul", 1, StackKey.LIST),
+      ["unordered_list2"] = nest_tag("ul", 2, StackKey.LIST),
+      ["unordered_list3"] = nest_tag("ul", 3, StackKey.LIST),
+      ["unordered_list4"] = nest_tag("ul", 4, StackKey.LIST),
+      ["unordered_list5"] = nest_tag("ul", 5, StackKey.LIST),
+      ["unordered_list6"] = nest_tag("ul", 6, StackKey.LIST),
 
-			["ranged_verbatim_tag_end"] = apply_ranged_tag_handlers,
+      ["ordered_list1"] = nest_tag("ol", 1, StackKey.LIST),
+      ["ordered_list2"] = nest_tag("ol", 2, StackKey.LIST),
+      ["ordered_list3"] = nest_tag("ol", 3, StackKey.LIST),
+      ["ordered_list4"] = nest_tag("ol", 4, StackKey.LIST),
+      ["ordered_list5"] = nest_tag("ol", 5, StackKey.LIST),
+      ["ordered_list6"] = nest_tag("ol", 6, StackKey.LIST),
 
-			["single_footnote"] = recollect_footnote,
-			["multi_footnote"] = recollect_footnote,
-		},
+      ["quote1"] = nest_tag("blockquote", 1, StackKey.BLOCK_QUOTE),
+      ["quote2"] = nest_tag("blockquote", 2, StackKey.BLOCK_QUOTE),
+      ["quote3"] = nest_tag("blockquote", 3, StackKey.BLOCK_QUOTE),
+      ["quote4"] = nest_tag("blockquote", 4, StackKey.BLOCK_QUOTE),
+      ["quote5"] = nest_tag("blockquote", 5, StackKey.BLOCK_QUOTE),
+      ["quote6"] = nest_tag("blockquote", 6, StackKey.BLOCK_QUOTE),
 
-		cleanup = function(output, state)
-			if #state.footnotes > 0 then
-				output = output .. "\n<hr />\n"
-			end
+      ["tag_parameters"] = function(text, _, state)
+        if state.ignore_tag_parameters then
+          state.ignore_tag_parameters = nil
+          return {
+            output = "",
+            state = state,
+          }
+        end
 
-			for _, footnote in ipairs(state.footnotes) do
-				output = output .. "\n" .. build_footnote(footnote)
-			end
-			return output
-		end,
-	},
+        return text
+      end,
+
+      ["tag_name"] = function(text, node, _, _)
+        local _, tag_start_column = node:range()
+
+        if text == "code" then
+          return {
+            output = "\n<pre>\n<code>\n",
+            state = {
+              -- Minus one to account for the `@`
+              tag_indent = tag_start_column - 1,
+              tag_close = "\n</pre>\n<code>\n",
+            },
+          }
+        elseif text == "comment" then
+          return {
+            output = "<!--",
+            state = {
+              tag_indent = tag_start_column - 1,
+              tag_close = "-->",
+            },
+          }
+        elseif text == "math" and module.config.public.extensions["mathematics"] then
+          return {
+            output = module.config.public.mathematics.block["start"],
+            state = {
+              tag_indent = tag_start_column - 1,
+              tag_close = module.config.public.mathematics.block["end"],
+            },
+          }
+        elseif text == "document.meta" then
+          local allows_metadata = module.config.public.extensions["metadata"]
+
+          return {
+            output = allows_metadata and module.config.public.metadata["start"] or nil,
+            state = {
+              tag_indent = tag_start_column - 1,
+              tag_close = allows_metadata and module.config.public.metadata["end"] or nil,
+              is_meta = true,
+            },
+          }
+        elseif
+            text == "embed"
+            and node:next_named_sibling()
+            and vim.tbl_contains(
+              { "markdown", "html", module.config.public.extensions["latex"] and "latex" or nil },
+              module.required["core.integrations.treesitter"].get_node_text(node:next_named_sibling())
+            )
+        then
+          return {
+            state = {
+              tag_indent = tag_start_column - 1,
+              tag_close = "",
+              ignore_tag_parameters = true,
+            },
+          }
+        end
+
+        return {
+          state = {
+            ignore_tag_parameters = true,
+            tag_close = nil,
+          },
+        }
+      end,
+
+      ["ranged_verbatim_tag_content"] = function(text, node, state)
+        if state.is_meta then
+          state.is_meta = false
+          if module.config.public.extensions["metadata"] then
+            return {
+              keep_descending = true,
+              state = {
+                parse_as = "norg_meta",
+              },
+            }
+          else
+            return
+          end
+        end
+
+        local _, ranged_tag_content_column_start = node:range()
+
+        local split_text = vim.split(text, "\n")
+
+        split_text[1] = string.rep(" ", ranged_tag_content_column_start - state.tag_indent) .. split_text[1]
+
+        for i = 2, #split_text do
+          split_text[i] = split_text[i]:sub(state.tag_indent + 1)
+        end
+
+        return state.tag_close and (table.concat(split_text, "\n") .. "\n")
+      end,
+
+      ["ranged_verbatim_tag_end"] = function(_, _, state)
+        local tag_close = state.tag_close
+        state.tag_close = nil
+        return tag_close
+      end,
+
+      ["todo_item_done"] = todo_item("done"),
+      ["todo_item_undone"] = todo_item("undone"),
+      ["todo_item_pending"] = todo_item("pending"),
+      ["todo_item_urgent"] = todo_item("urgent"),
+      ["todo_item_cancelled"] = todo_item("cancelled"),
+      ["todo_item_recurring"] = todo_item("recurring"),
+      ["todo_item_on_hold"] = todo_item("on_hold"),
+      ["todo_item_uncertain"] = todo_item("uncertain"),
+
+      ["single_definition_prefix"] = function()
+        return module.config.public.extensions["definition-nest_tags"] and ": "
+      end,
+
+      ["multi_definition_prefix"] = function(_, _, state)
+        if not module.config.public.extensions["definition-nest_tags"] then
+          return
+        end
+
+        return {
+          output = ": ",
+          state = {
+            indent = state.indent + 2,
+          },
+        }
+      end,
+
+      ["multi_definition_suffix"] = function(_, _, state)
+        if not module.config.public.extensions["definition-nest_tags"] then
+          return
+        end
+
+        return {
+          state = {
+            indent = state.indent - 2,
+          },
+        }
+      end,
+
+      ["_prefix"] = function(_, node)
+        return {
+          state = {
+            ranged_tag_indentation_level = ({ node:range() })[2],
+          },
+        }
+      end,
+
+      ["capitalized_word"] = function(text, node)
+        if node:parent():type() == "insertion" then
+          if text == "Image" then
+            return "!["
+          end
+        end
+      end,
+
+      ["strong_carryover"] = "",
+      ["weak_carryover"] = "",
+
+      ["key"] = function(text, _, state)
+        return string.rep(" ", state.indent) .. (text == "authors" and "author" or text)
+      end,
+
+      [":"] = ": ",
+
+      ["["] = update_indent(2),
+      ["]"] = update_indent(-2),
+      ["{"] = update_indent(2),
+      ["}"] = update_indent(-2),
+
+      ["string"] = handle_metadata_literal,
+      ["number"] = handle_metadata_literal,
+      ["horizontal_line"] = "___",
+    },
+
+    recollectors = {
+      ["paragraph_segment"] = function(output, state)
+        if state.heading and state.heading > 0 then
+          table.insert(output, "</h" .. state.heading .. ">\n")
+          state.heading = 0
+        elseif is_stack_empty(state, StackKey.LIST) then
+          table.insert(output, "</li>\n")
+        else
+          table.insert(output, "</p>\n")
+        end
+
+        return output
+      end,
+
+      ["link_location"] = function(output, state)
+        last_parsed_link_location = output[#output - 1]
+
+        if state.is_url then
+          state.is_url = false
+          return output
+        end
+
+        table.insert(output, #output - 1, "#")
+        output[#output - 1] = output[#output - 1]:lower():gsub("-", " "):gsub("%p+", ""):gsub("%s+", "-")
+
+        return output
+      end,
+
+      ["link"] = anchor_recollector,
+      ["anchor_definition"] = anchor_recollector,
+
+      ["ranged_verbatim_tag"] = function(output)
+        if output[2] and output[2]:match("^[ \t]+$") then
+          table.remove(output, 2)
+        end
+
+        return output
+      end,
+
+      ["generic_list"] = nested_tag_recollector(StackKey.LIST),
+      ["quote"] = nested_tag_recollector(StackKey.BLOCK_QUOTE),
+
+      ["single_definition"] = function(output)
+        return {
+          output[2],
+          output[3],
+          output[1],
+          output[4],
+        }
+      end,
+
+      ["multi_definition"] = function(output)
+        output[3] = output[3]:gsub("^\n+  ", "\n") .. output[1]
+        table.remove(output, 1)
+
+        return output
+      end,
+
+      -- TODO
+      ["insertion"] = function(output)
+        if output[1] == "![" then
+          table.insert(output, 1, "\n")
+
+          local split = vim.split(output[3], "/", { plain = true })
+          table.insert(output, 3, (split[#split]:match("^(.+)%..+$") or split[#split]) .. "](")
+          table.insert(output, ")\n")
+        end
+
+        return output
+      end,
+
+      ["heading1"] = add_closing_tag("</div>\n"),
+      ["heading2"] = add_closing_tag("</div>\n"),
+      ["heading3"] = add_closing_tag("</div>\n"),
+      ["heading4"] = add_closing_tag("</div>\n"),
+      ["heading5"] = add_closing_tag("</div>\n"),
+      ["heading6"] = add_closing_tag("</div>\n"),
+
+      ["object"] = handle_metadata_composite_element("{}"),
+      ["array"] = handle_metadata_composite_element("[]"),
+    },
+
+    cleanup = function()
+      last_parsed_link_location = ""
+    end,
+  },
 }
 
 return module
