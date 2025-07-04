@@ -193,7 +193,6 @@ end
 local function wrap_anchor()
 	return function(output, state)
 		local link_builder = module.config.public.link_builders.link_builder
-			or module.private.link_builders.link_builder
 
 		local href
 		if state.link then
@@ -309,7 +308,6 @@ end
 local function paragraph_segment(text, _, state)
 	local output = "\n"
 	local fragment_builder = module.config.public.link_builders.fragment_builder
-		or module.private.link_builders.fragment_builder
 
 	if state.heading then
 		output = "<" .. state.heading .. ' id="' .. fragment_builder({ type = state.target_type, text = text }) .. '">'
@@ -473,12 +471,60 @@ module.config.public = {
 	-- The default is recommended, although you can change it.
 	extension = "html",
 	link_builders = {
-		-- TODO
-		fragment_builder = nil,
-		-- TODO
-		link_builder = nil,
-		-- TODO
-		path_builder = nil,
+		--- Function handler for building just the fragment. The fragment is the part
+    --- of the URL that comes after the "#" and it's used for linking to specific
+    --- IDs within a file.
+		---@param args FragmentArgs
+		---@return string
+		fragment_builder = function(args)
+			if args.type == "external_file" or args.type == "url" then
+				-- External links and target URLs don't have target support by default.
+				return ""
+			end
+			local text = args.text or ""
+
+			return args.type .. "-" .. text:lower():gsub(" ", "")
+		end,
+		-- Function handler for building just the path URL path.
+		---@param link Link
+		---@return string
+		path_builder = function(link)
+			local file = link.link_file_text or ""
+			if file:match("%$/") then
+				local workspace_path = "/"
+				local dirman = modules.get_module("core.dirman")
+				local current_workspace = dirman.get_current_workspace()
+				if current_workspace then
+					workspace_path = "/" .. current_workspace[1] .. "/"
+				end
+				return (file:gsub("%$/", workspace_path):gsub(".norg", ".html"))
+			elseif #file > 0 then
+				return (file:gsub("%$", "/"):gsub(".norg", ".html"))
+			else
+				return ""
+			end
+		end,
+		--- Function handler for building the entire link. If you change this handler
+    --- you'll need to change 
+		---@param link Link
+		---@return string
+		link_builder = function(link)
+			if link.link_type == "external_file" then
+				local file = link.link_location_text or ""
+				return "file://" .. file:gsub(" ", "")
+			end
+
+			if link.link_type == "url" then
+				return link.link_location_text
+			end
+
+			local fragment_builder = module.config.public.link_builders.fragment_builder
+			local path_builder = module.config.public.link_builders.path_builder
+
+			return path_builder(link)
+				.. "#"
+				.. fragment_builder({ type = link.link_type, text = link.link_location_text })
+		end,
 	},
 }
 
@@ -514,58 +560,6 @@ module.private = {
 		["superscript"] = "sup",
 		["subscript"] = "sub",
 		["inline_math"] = { tag = "code", class = "inline-math" },
-	},
-	link_builders = {
-		---@param args FragmentArgs
-		---@return string
-		fragment_builder = function(args)
-			if args.type == "external_file" or args.type == "url" then
-				-- External links and target URLs don't have target support by default.
-				return ""
-			end
-			local text = args.text or ""
-
-			return args.type .. "-" .. text:lower():gsub(" ", "")
-		end,
-		---@param link Link
-		---@return string
-		path_builder = function(link)
-			local file = link.link_file_text or ""
-			if file:match("%$/") then
-				local workspace_path = "/"
-				local dirman = modules.get_module("core.dirman")
-				local current_workspace = dirman.get_current_workspace()
-				if current_workspace then
-					workspace_path = "/" .. current_workspace[1] .. "/"
-				end
-				return (file:gsub("%$/", workspace_path):gsub(".norg", ".html"))
-			elseif #file > 0 then
-				return (file:gsub("%$", "/"):gsub(".norg", ".html"))
-			else
-				return ""
-			end
-		end,
-		---@param link Link
-		---@return string
-		link_builder = function(link)
-			if link.link_type == "external_file" then
-				local file = link.link_location_text or ""
-				return "file://" .. file:gsub(" ", "")
-			end
-
-			if link.link_type == "url" then
-				return link.link_location_text
-			end
-
-			local fragment_builder = module.config.public.link_builders.fragment_builder
-				or module.private.link_builders.fragment_builder
-			local path_builder = module.config.public.link_builders.path_builder
-				or module.private.link_builders.path_builder
-
-			return path_builder(link)
-				.. "#"
-				.. fragment_builder({ type = link.link_type, text = link.link_location_text })
-		end,
 	},
 }
 
