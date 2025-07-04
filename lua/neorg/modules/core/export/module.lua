@@ -97,8 +97,150 @@ module.public = {
         return modules.get_module("core.export." .. ftype), modules.get_module_config("core.export." .. ftype)
     end,
 
+    ---export part of a buffer
+    ---@param buffer number
+    ---@param start_row number 1 indexed
+    ---@param end_row number 1 indexed, inclusive
+    ---@param filetype string
+    ---@return string? content, string? extension exported content as a string, and the extension
+    ---used for the export
+    export_range = function(buffer, start_row, end_row, filetype)
+        local converter = module.private.get_converter_checked(filetype)
+        if not converter then
+            return
+        end
+        local content = vim.iter(vim.api.nvim_buf_get_lines(buffer, start_row - 1, end_row, false)):join("\n")
+        local root = ts.get_document_root(content)
+        if not root then
+            return
+        end
+
+        return module.public.export_from_root(root, converter, content)
+    end,
+
+    --- Takes a buffer and exports it to a specific file
+    ---@param buffer number #The buffer ID to read the contents from
+    ---@param filetype string #A Neovim filetype to specify which language to export to
+    ---@return string?, string? #The entire buffer parsed, converted and returned as a string, as well as the extension used for the export.
+    export = function(buffer, filetype)
+        local converter, converter_config = module.private.get_converter_checked(filetype)
+        if not converter or not converter_config then
+            return
+        end
+
+        local document_root = ts.get_document_root(buffer)
+
+        if not document_root then
+            return
+        end
+
+        local content = module.public.export_from_root(document_root, converter, buffer)
+
+        return content, converter_config.extension
+    end,
+
+    ---Do the work of exporting the given TS node via the given converter
+    ---@param root TSNode
+    ---@param converter table
+    ---@param source number | string
+    ---@return string
+    export_from_root = function(root, converter, source)
+        -- Initialize the state. The state is a table that exists throughout the entire duration
+        -- of the export, and can be used to e.g. retain indent levels and/or keep references.
+        local state = converter.export.init_state and converter.export.init_state() or {}
+        local ts_utils = ts.get_ts_utils()
+
+        --- Descends down a node and its children
+        ---@param start table #The TS node to begin at
+        ---@return string #The exported/converted node as a string
+        local function descend(start)
+            -- We do not want to parse erroneous nodes, so we skip them instead
+            if start:type() == "ERROR" then
+                return ""
+            end
+
+            local output = {}
+
+            for node in start:iter_children() do
+                -- See if there is a conversion function for the specific node type we're dealing with
+                local exporter = converter.export.functions[node:type()]
+
+                if exporter then
+                    -- The value of `exporter` can be of 3 different types:
+                    --  a function, in which case it should be executed
+                    --  a boolean (true), which signifies to use the content of the node as-is without changing anything
+                    --  a string, in which case every time the node is encountered it will always be converted to a static value
+                    if type(exporter) == "function" then
+                        -- An exporter function can return output string or table with 3 values:
+                        --  `output` - the converted text
+                        --  `keep_descending`  - if true will continue to recurse down the current node's children despite the current
+                        --                      node already being parsed
+                        --  `state`   - a modified version of the state that then gets merged into the main state table
+                        local result = exporter(vim.treesitter.get_node_text(node, source), node, state, ts_utils)
+
+                        if type(result) == "table" then
+                            state = result.state and vim.tbl_extend("force", state, result.state) or state
+
+                            if result.output then
+                                table.insert(output, result.output)
+                            end
+
+                            if result.keep_descending then
+                                if state.parse_as then
+                                    node = ts.get_document_root(
+                                        "\n" .. vim.treesitter.get_node_text(node, source),
+                                        state.parse_as
+                                    )
+                                    state.parse_as = nil
+                                end
+
+                                local ret = descend(node)
+
+                                if ret then
+                                    table.insert(output, ret)
+                                end
+                            end
+                        elseif type(result) == "string" then
+                            table.insert(output, result)
+                        end
+                    elseif exporter == true then
+                        table.insert(output, ts.get_node_text(node, source))
+                    else
+                        table.insert(output, exporter)
+                    end
+                else -- If no exporter exists for the current node then keep descending
+                    local ret = descend(node)
+
+                    if ret then
+                        table.insert(output, ret)
+                    end
+                end
+            end
+
+            -- Recollectors exist to collect all the converted children nodes of a parent node
+            -- and to optionally rearrange them into a new layout. Consider the following Neorg markup:
+            --  $ Term
+            --    Definition
+            -- The markdown version looks like this:
+            --  Term
+            --  : Definition
+            -- Without a recollector such a conversion wouldn't be possible, as by simply converting each
+            -- node individually you'd end up with:
+            --  : Term
+            --    Definition
+            --
+            -- The recollector can encounter a `definition` node, see the nodes it is made up of ({ ": ", "Term", "Definition" })
+            -- and rearrange its components to { "Term", ": ", "Definition" } to then achieve the desired result.
+            local recollector = converter.export.recollectors[start:type()]
+
+            return recollector and table.concat(recollector(output, state, start, ts_utils) or {})
+                or (not vim.tbl_isempty(output) and table.concat(output))
+        end
+
+        local output = descend(root)
+
         -- Every converter can also come with a `cleanup` function that performs some final tweaks to the output string
-        return converter.export.cleanup and converter.export.cleanup(output, state) or output
+        return converter.export.cleanup and converter.export.cleanup(output) or output
     end,
 }
 
