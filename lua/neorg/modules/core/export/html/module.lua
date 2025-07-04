@@ -52,6 +52,10 @@ local HeadingType = {
 --- @field file string
 --- @field text string
 --- @field type HeadingType
+---
+--- @class FragmentArgs
+--- @field type string
+--- @field text string
 
 --> Generic Utility Functions
 
@@ -185,9 +189,8 @@ local function add_closing_tag(tag, cleanup)
 end
 
 ---Builds a link and adds it to the output givne recollected data in the state table.
----@param type "save_anchor"|"use_link"
 ---@return fun(_: any, state: table): table
-local function wrap_anchor(type)
+local function wrap_anchor()
 	return function(output, state)
 		local link_builder = module.config.public.link_builders.link_builder
 			or module.private.link_builders.link_builder
@@ -206,10 +209,6 @@ local function wrap_anchor(type)
 			content = state.link.link_text
 		end
 
-		if type == "anchor_definition" then
-			state.anchors[content] = href
-		end
-
 		output = {
 			'<a href="' .. href .. '">',
 			content,
@@ -226,17 +225,7 @@ local function set_link(_, node)
 	local hop = modules.get_module("core.esupports.hop")
 	local link = hop.parse_link(node, 0)
 
-	-- Fails to locate link target when the link is in an unopened buffer:
-	--
-	-- local target = hop.locate_link_target(link)
-	--
-	-- # Error message
-	-- Buffer <number> must be loaded to create parser
-	-- ...nvimbnlmap/usr/share/nvim/runtime/lua/vim/treesitter.lua:104: in function 'get_parser'
-	-- ...ua/neorg/modules/core/integrations/treesitter/module.lua:661: in function 'get_document_root'
-
 	return {
-		output = "",
 		keep_descending = true,
 		state = {
 			link = link,
@@ -319,13 +308,13 @@ end
 ---@return table
 local function paragraph_segment(text, _, state)
 	local output = "\n"
-	local target_builder = module.config.public.link_builders.target_builder
-		or module.private.link_builders.target_builder
+	local fragment_builder = module.config.public.link_builders.fragment_builder
+		or module.private.link_builders.fragment_builder
 
 	if state.heading then
-		output = "<" .. state.heading .. ' id="' .. target_builder({ type = state.target_type, text = text }) .. '">'
+		output = "<" .. state.heading .. ' id="' .. fragment_builder({ type = state.target_type, text = text }) .. '">'
 		-- Add span to support generic link targets
-		output = output .. '<span id="' .. target_builder({ type = "generic", text = text }) .. '"></span>'
+		output = output .. '<span id="' .. fragment_builder({ type = "generic", text = text }) .. '"></span>'
 	end
 
 	local todo = ""
@@ -485,7 +474,7 @@ module.config.public = {
 	extension = "html",
 	link_builders = {
 		-- TODO
-		target_builder = nil,
+		fragment_builder = nil,
 		-- TODO
 		link_builder = nil,
 		-- TODO
@@ -527,17 +516,21 @@ module.private = {
 		["inline_math"] = { tag = "code", class = "inline-math" },
 	},
 	link_builders = {
-		target_builder = function(target)
-			if target.type == "external_file" or target.type == "url" then
+		---@param args FragmentArgs
+		---@return string
+		fragment_builder = function(args)
+			if args.type == "external_file" or args.type == "url" then
 				-- External links and target URLs don't have target support by default.
 				return ""
 			end
-			local text = target.text or ""
+			local text = args.text or ""
 
-			return target.type .. "-" .. text:lower():gsub(" ", "")
+			return args.type .. "-" .. text:lower():gsub(" ", "")
 		end,
+		---@param link Link
+		---@return string
 		path_builder = function(link)
-			local file = link.file or ""
+			local file = link.link_file_text or ""
 			if file:match("%$/") then
 				local workspace_path = "/"
 				local dirman = modules.get_module("core.dirman")
@@ -545,21 +538,18 @@ module.private = {
 				if current_workspace then
 					workspace_path = "/" .. current_workspace[1] .. "/"
 				end
-				return (link.file:gsub("%$/", workspace_path):gsub(".norg", ""))
+				return (file:gsub("%$/", workspace_path):gsub(".norg", ".html"))
 			elseif #file > 0 then
-				return (link.file:gsub("%$", "/"):gsub(".norg", ""))
+				return (file:gsub("%$", "/"):gsub(".norg", ".html"))
 			else
 				return ""
 			end
 		end,
+		---@param link Link
+		---@return string
 		link_builder = function(link)
-			local target_builder = module.config.public.link_builders.target_builder
-				or module.private.link_builders.target_builder
-			local path_builder = module.config.public.link_builders.path_builder
-				or module.private.link_builders.path_builder
-
 			if link.link_type == "external_file" then
-				local file = link.link_file_text or ""
+				local file = link.link_location_text or ""
 				return "file://" .. file:gsub(" ", "")
 			end
 
@@ -567,9 +557,14 @@ module.private = {
 				return link.link_location_text
 			end
 
+			local fragment_builder = module.config.public.link_builders.fragment_builder
+				or module.private.link_builders.fragment_builder
+			local path_builder = module.config.public.link_builders.path_builder
+				or module.private.link_builders.path_builder
+
 			return path_builder(link)
 				.. "#"
-				.. target_builder({ type = link.link_type, text = link.link_location_text })
+				.. fragment_builder({ type = link.link_type, text = link.link_location_text })
 		end,
 	},
 }
@@ -670,9 +665,9 @@ module.public = {
 			["paragraph"] = add_closing_p_tag,
 			["paragraph_segment"] = add_closing_segement_tags,
 
-			["link"] = wrap_anchor("use_link"),
-			["anchor_definition"] = wrap_anchor("save_anchor"),
-			["anchor_declaration"] = wrap_anchor("use_link"),
+			["link"] = wrap_anchor(),
+			["anchor_definition"] = wrap_anchor(),
+			["anchor_declaration"] = wrap_anchor(),
 
 			["generic_list"] = nested_tag_recollector(StackKey.LIST),
 			["quote"] = nested_tag_recollector(StackKey.BLOCK_QUOTE),
