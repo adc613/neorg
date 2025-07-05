@@ -56,6 +56,11 @@ local HeadingType = {
 --- @class FragmentArgs
 --- @field type string
 --- @field text string
+---
+--- @class Footnote
+--- @field number number
+--- @field title string
+--- @field content string
 
 --> Generic Utility Functions
 
@@ -255,15 +260,18 @@ end
 ---@param output table
 ---@return table
 local function recollect_footnote(output, state)
-	local title = table.remove(output, 1) .. table.remove(output, 1)
-	local content = table.concat(output)
-	local footnote_number = #state.footnotes + 1
+  local footnote = {
+    title = table.remove(output, 1) .. table.remove(output, 1),
+    content = table.concat(output),
+    number = #state.footnotes + 1,
+  }
 
-	table.insert(state.footnotes, { title = title, content = content, number = footnote_number })
+	table.insert(state.footnotes, footnote)
+  local annotation = module.config.public.footnotes.annotation
 
 	return {
-		'<a href="#footnote-' .. footnote_number .. '">[' .. footnote_number .. "]</a>",
-	}
+		annotation(footnote)
+  }
 end
 
 ---@return fun(text: string, node: TSNode): table
@@ -416,22 +424,6 @@ local function apply_ranged_tag_handlers(output, state)
 	return output
 end
 
-local function build_footnote(footnote)
-	return table.concat({
-		'\n<div class="footnote" id="footnote-' .. footnote.number .. '">',
-		'\n<div class="footnote-number">\n',
-		footnote.number,
-		"\n</div>",
-		'\n<div class="footnote-title">\n',
-		footnote.title,
-		"\n</div>",
-		'\n<div class="footnore-content">\n',
-		footnote.content,
-		"\n</div>",
-		"\n</div>",
-		"\n",
-	})
-end
 
 local function get_anchor(_, node, _)
 	local hop = modules.get_module("core.esupports.hop")
@@ -470,6 +462,44 @@ module.config.public = {
 	-- when creating HTML files.
 	-- The default is recommended, although you can change it.
 	extension = "html",
+  footnotes = {
+    --- TODO
+    ---@param footnote Footnote
+    ---@return string
+    fragment = function(footnote)
+      return "footnote-" .. footnote.number
+    end,
+    ---  TODO
+    ---@param footnote Footnote
+    ---@return string
+    annotation = function(footnote)
+      local fragment = module.config.public.footnotes.fragment
+      local fragment_str = fragment(footnote)
+
+      return '<a href="#' .. fragment_str .. '">[' .. footnote.number .. "]</a>"
+    end,
+    --- Builds the footnote tag to be appended to the bottom of the page.
+    ---@param footnote Footnote
+    ---@return table
+    build_footnote = function(footnote)
+      local fragment = module.config.public.footnotes.fragment
+      local fragment_str = fragment(footnote)
+      return {
+        '\n<div class="footnote" id="' .. fragment_str .. '">',
+        '\n<div class="footnote-number">\n',
+        footnote.number,
+        "\n</div>",
+        '\n<div class="footnote-title">\n',
+        footnote.title,
+        "\n</div>",
+        '\n<div class="footnore-content">\n',
+        footnote.content,
+        "\n</div>",
+        "\n</div>",
+        "\n",
+      }
+    end,
+  },
 	link_builders = {
 		--- Function handler for building just the fragment. The fragment is the part
 		--- of the URL that comes after the "#" and it's used for linking to specific
@@ -694,13 +724,16 @@ module.public = {
 		},
 
 		cleanup = function(output, state)
+      local build_footnote = module.config.public.link_builders.build_footnote
+
 			if #state.footnotes > 0 then
 				output = output .. "\n<hr />\n"
 			end
 
 			for _, footnote in ipairs(state.footnotes) do
-				output = output .. "\n" .. build_footnote(footnote)
+				output = output .. "\n" .. table.concat(build_footnote(footnote))
 			end
+
 			return output
 		end,
 	},
