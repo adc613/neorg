@@ -197,11 +197,11 @@ end
 ---@return fun(_: any, state: table): table
 local function wrap_anchor()
 	return function(output, state)
-		local link_builder = module.config.public.link_builders.link_builder
+		local builder = module.config.public.links.builder
 
 		local href
 		if state.link then
-			href = link_builder(state.link)
+			href = builder(state.link)
 		else
 			href = ""
 		end
@@ -315,7 +315,7 @@ end
 ---@return table
 local function paragraph_segment(text, _, state)
 	local output = "\n"
-	local fragment_builder = module.config.public.link_builders.fragment_builder
+	local fragment_builder = module.config.public.links.fragment_builder
 
 	if state.heading then
 		output = "<" .. state.heading .. ' id="' .. fragment_builder({ type = state.target_type, text = text }) .. '">'
@@ -463,6 +463,11 @@ module.config.public = {
 	-- The default is recommended, although you can change it.
 	extension = "html",
   footnotes = {
+    ---The string that prefixes footnotes.
+    ---@return string
+    prefix = function()
+      return  "\n<hr />\n"
+    end,
     --- TODO
     ---@param footnote Footnote
     ---@return string
@@ -481,7 +486,7 @@ module.config.public = {
     --- Builds the footnote tag to be appended to the bottom of the page.
     ---@param footnote Footnote
     ---@return table
-    build_footnote = function(footnote)
+    builder = function(footnote)
       local fragment = module.config.public.footnotes.fragment
       local fragment_str = fragment(footnote)
       return {
@@ -500,7 +505,7 @@ module.config.public = {
       }
     end,
   },
-	link_builders = {
+	links = {
 		--- Function handler for building just the fragment. The fragment is the part
 		--- of the URL that comes after the "#" and it's used for linking to specific
 		--- IDs within a file.
@@ -538,7 +543,7 @@ module.config.public = {
 		--- you'll need to change
 		---@param link Link
 		---@return string
-		link_builder = function(link)
+		builder = function(link)
 			if link.link_type == "external_file" then
 				local file = link.link_location_text or ""
 				return "file://" .. file:gsub(" ", "")
@@ -548,8 +553,8 @@ module.config.public = {
 				return link.link_location_text
 			end
 
-			local fragment_builder = module.config.public.link_builders.fragment_builder
-			local path_builder = module.config.public.link_builders.path_builder
+			local fragment_builder = module.config.public.links.fragment_builder
+			local path_builder = module.config.public.links.path_builder
 
 			return path_builder(link)
 				.. "#"
@@ -724,14 +729,15 @@ module.public = {
 		},
 
 		cleanup = function(output, state)
-      local build_footnote = module.config.public.link_builders.build_footnote
+      local builder = module.config.public.footnotes.builder
+      local prefix = module.config.public.footnotes.prefix
 
 			if #state.footnotes > 0 then
-				output = output .. "\n<hr />\n"
+				output = output ..prefix()
 			end
 
 			for _, footnote in ipairs(state.footnotes) do
-				output = output .. "\n" .. table.concat(build_footnote(footnote))
+				output = output .. "\n" .. table.concat(builder(footnote))
 			end
 
 			return output
