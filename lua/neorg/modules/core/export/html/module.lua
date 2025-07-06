@@ -56,6 +56,11 @@ local HeadingType = {
 --- @class FragmentArgs
 --- @field type string
 --- @field text string
+---
+--- @class Footnote
+--- @field number number
+--- @field title string
+--- @field content string
 
 --> Generic Utility Functions
 
@@ -192,11 +197,11 @@ end
 ---@return fun(_: any, state: table): table
 local function wrap_anchor()
 	return function(output, state)
-		local link_builder = module.config.public.link_builders.link_builder
+		local builder = module.config.public.links.builder
 
 		local href
 		if state.link then
-			href = link_builder(state.link)
+			href = builder(state.link)
 		else
 			href = ""
 		end
@@ -255,14 +260,18 @@ end
 ---@param output table
 ---@return table
 local function recollect_footnote(output, state)
-	local title = table.remove(output, 1) .. table.remove(output, 1)
-	local content = table.concat(output)
-	local footnote_number = #state.footnotes + 1
+	local annotation = module.config.public.footnotes.annotation
 
-	table.insert(state.footnotes, { title = title, content = content, number = footnote_number })
+	local footnote = {
+		title = table.remove(output, 1) .. table.remove(output, 1),
+		content = table.concat(output),
+		number = #state.footnotes + 1,
+	}
+
+	table.insert(state.footnotes, footnote)
 
 	return {
-		'<a href="#footnote-' .. footnote_number .. '">[' .. footnote_number .. "]</a>",
+		annotation(footnote),
 	}
 end
 
@@ -307,7 +316,7 @@ end
 ---@return table
 local function paragraph_segment(text, _, state)
 	local output = "\n"
-	local fragment_builder = module.config.public.link_builders.fragment_builder
+	local fragment_builder = module.config.public.links.fragment_builder
 
 	if state.heading then
 		output = "<" .. state.heading .. ' id="' .. fragment_builder({ type = state.target_type, text = text }) .. '">'
@@ -416,23 +425,6 @@ local function apply_ranged_tag_handlers(output, state)
 	return output
 end
 
-local function build_footnote(footnote)
-	return table.concat({
-		'\n<div class="footnote" id="footnote-' .. footnote.number .. '">',
-		'\n<div class="footnote-number">\n',
-		footnote.number,
-		"\n</div>",
-		'\n<div class="footnote-title">\n',
-		footnote.title,
-		"\n</div>",
-		'\n<div class="footnore-content">\n',
-		footnote.content,
-		"\n</div>",
-		"\n</div>",
-		"\n",
-	})
-end
-
 local function get_anchor(_, node, _)
 	local hop = modules.get_module("core.esupports.hop")
 
@@ -470,7 +462,50 @@ module.config.public = {
 	-- when creating HTML files.
 	-- The default is recommended, although you can change it.
 	extension = "html",
-	link_builders = {
+	footnotes = {
+		---The string that prefixes footnotes.
+		---@return string
+		prefix = function()
+			return "\n<hr />\n"
+		end,
+		--- TODO
+		---@param footnote Footnote
+		---@return string
+		fragment = function(footnote)
+			return "footnote-" .. footnote.number
+		end,
+		---  TODO
+		---@param footnote Footnote
+		---@return string
+		annotation = function(footnote)
+			local fragment = module.config.public.footnotes.fragment
+			local fragment_str = fragment(footnote)
+
+			return '<a href="#' .. fragment_str .. '">[' .. footnote.number .. "]</a>"
+		end,
+		--- Builds the footnote tag to be appended to the bottom of the page.
+		---@param footnote Footnote
+		---@return table
+		builder = function(footnote)
+			local fragment = module.config.public.footnotes.fragment
+			local fragment_str = fragment(footnote)
+			return {
+				'\n<div class="footnote" id="' .. fragment_str .. '">',
+				'\n<div class="footnote-number">\n',
+				footnote.number,
+				"\n</div>",
+				'\n<div class="footnote-title">\n',
+				footnote.title,
+				"\n</div>",
+				'\n<div class="footnore-content">\n',
+				footnote.content,
+				"\n</div>",
+				"\n</div>",
+				"\n",
+			}
+		end,
+	},
+	links = {
 		--- Function handler for building just the fragment. The fragment is the part
 		--- of the URL that comes after the "#" and it's used for linking to specific
 		--- IDs within a file.
@@ -508,7 +543,7 @@ module.config.public = {
 		--- you'll need to change
 		---@param link Link
 		---@return string
-		link_builder = function(link)
+		builder = function(link)
 			if link.link_type == "external_file" then
 				local file = link.link_location_text or ""
 				return "file://" .. file:gsub(" ", "")
@@ -518,8 +553,8 @@ module.config.public = {
 				return link.link_location_text
 			end
 
-			local fragment_builder = module.config.public.link_builders.fragment_builder
-			local path_builder = module.config.public.link_builders.path_builder
+			local fragment_builder = module.config.public.links.fragment_builder
+			local path_builder = module.config.public.links.path_builder
 
 			return path_builder(link)
 				.. "#"
@@ -694,13 +729,17 @@ module.public = {
 		},
 
 		cleanup = function(output, state)
+			local builder = module.config.public.footnotes.builder
+			local prefix = module.config.public.footnotes.prefix
+
 			if #state.footnotes > 0 then
-				output = output .. "\n<hr />\n"
+				output = output .. prefix()
 			end
 
 			for _, footnote in ipairs(state.footnotes) do
-				output = output .. "\n" .. build_footnote(footnote)
+				output = output .. "\n" .. table.concat(builder(footnote))
 			end
+
 			return output
 		end,
 	},
