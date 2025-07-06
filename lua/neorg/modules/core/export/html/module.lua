@@ -260,18 +260,19 @@ end
 ---@param output table
 ---@return table
 local function recollect_footnote(output, state)
-  local footnote = {
-    title = table.remove(output, 1) .. table.remove(output, 1),
-    content = table.concat(output),
-    number = #state.footnotes + 1,
-  }
+	local annotation = module.config.public.footnotes.annotation
+
+	local footnote = {
+		title = table.remove(output, 1) .. table.remove(output, 1),
+		content = table.concat(output),
+		number = #state.footnotes + 1,
+	}
 
 	table.insert(state.footnotes, footnote)
-  local annotation = module.config.public.footnotes.annotation
 
 	return {
-		annotation(footnote)
-  }
+		annotation(footnote),
+	}
 end
 
 ---@return fun(text: string, node: TSNode): table
@@ -424,7 +425,6 @@ local function apply_ranged_tag_handlers(output, state)
 	return output
 end
 
-
 local function get_anchor(_, node, _)
 	local hop = modules.get_module("core.esupports.hop")
 
@@ -462,49 +462,49 @@ module.config.public = {
 	-- when creating HTML files.
 	-- The default is recommended, although you can change it.
 	extension = "html",
-  footnotes = {
-    ---The string that prefixes footnotes.
-    ---@return string
-    prefix = function()
-      return  "\n<hr />\n"
-    end,
-    --- TODO
-    ---@param footnote Footnote
-    ---@return string
-    fragment = function(footnote)
-      return "footnote-" .. footnote.number
-    end,
-    ---  TODO
-    ---@param footnote Footnote
-    ---@return string
-    annotation = function(footnote)
-      local fragment = module.config.public.footnotes.fragment
-      local fragment_str = fragment(footnote)
+	footnotes = {
+		---The string that prefixes footnotes.
+		---@return string
+		prefix = function()
+			return "\n<hr />\n"
+		end,
+		--- TODO
+		---@param footnote Footnote
+		---@return string
+		fragment = function(footnote)
+			return "footnote-" .. footnote.number
+		end,
+		---  TODO
+		---@param footnote Footnote
+		---@return string
+		annotation = function(footnote)
+			local fragment = module.config.public.footnotes.fragment
+			local fragment_str = fragment(footnote)
 
-      return '<a href="#' .. fragment_str .. '">[' .. footnote.number .. "]</a>"
-    end,
-    --- Builds the footnote tag to be appended to the bottom of the page.
-    ---@param footnote Footnote
-    ---@return table
-    builder = function(footnote)
-      local fragment = module.config.public.footnotes.fragment
-      local fragment_str = fragment(footnote)
-      return {
-        '\n<div class="footnote" id="' .. fragment_str .. '">',
-        '\n<div class="footnote-number">\n',
-        footnote.number,
-        "\n</div>",
-        '\n<div class="footnote-title">\n',
-        footnote.title,
-        "\n</div>",
-        '\n<div class="footnore-content">\n',
-        footnote.content,
-        "\n</div>",
-        "\n</div>",
-        "\n",
-      }
-    end,
-  },
+			return '<a href="#' .. fragment_str .. '">[' .. footnote.number .. "]</a>"
+		end,
+		--- Builds the footnote tag to be appended to the bottom of the page.
+		---@param footnote Footnote
+		---@return table
+		builder = function(footnote)
+			local fragment = module.config.public.footnotes.fragment
+			local fragment_str = fragment(footnote)
+			return {
+				'\n<div class="footnote" id="' .. fragment_str .. '">',
+				'\n<div class="footnote-number">\n',
+				footnote.number,
+				"\n</div>",
+				'\n<div class="footnote-title">\n',
+				footnote.title,
+				"\n</div>",
+				'\n<div class="footnore-content">\n',
+				footnote.content,
+				"\n</div>",
+				"\n</div>",
+				"\n",
+			}
+		end,
+	},
 	links = {
 		--- Function handler for building just the fragment. The fragment is the part
 		--- of the URL that comes after the "#" and it's used for linking to specific
@@ -729,11 +729,11 @@ module.public = {
 		},
 
 		cleanup = function(output, state)
-      local builder = module.config.public.footnotes.builder
-      local prefix = module.config.public.footnotes.prefix
+			local builder = module.config.public.footnotes.builder
+			local prefix = module.config.public.footnotes.prefix
 
 			if #state.footnotes > 0 then
-				output = output ..prefix()
+				output = output .. prefix()
 			end
 
 			for _, footnote in ipairs(state.footnotes) do
